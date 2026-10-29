@@ -1,8 +1,10 @@
-google-genai
+
+streamlit
 langchain
-langchain-google-genai
+langchain-core
 langchain-community
+langchain-google-genai
 langchain-text-splitters
 chromadb
 pypdf
-streamlit
+google-genai
