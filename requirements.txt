@@ -1,6 +1,5 @@
 google-genai
 langchain
-langchain-classic
 langchain-google-genai
 langchain-community
 langchain-text-splitters
