@@ -6,13 +6,12 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
 
 # --- Page Setup ---
-st.set_page_config(page_title="RAG Document Chatbot", page_icon="📄")
-st.title("📄 Chat with your Document (Google GenAI RAG)")
+st.set_page_config(page_title="Gemini AI Assistant & RAG Agent", page_icon="🤖")
+st.title("🤖 Dual-Mode Gemini Chatbot")
 
 # Retrieve Gemini API key from Streamlit secrets or environment variable
 api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
@@ -20,97 +19,130 @@ if not api_key:
     st.error("Please set the GEMINI_API_KEY in Streamlit Secrets or as an environment variable.")
     st.stop()
 
-# Initialize session states
+# Initialize session state variables
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "document_processed" not in st.session_state:
+    st.session_state.document_processed = False
 
-# --- Sidebar: Document Upload ---
+# --- Sidebar: Document Management & Controls ---
 with st.sidebar:
-    st.header("Upload Document")
-    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+    st.header("📄 Document Management")
+    uploaded_file = st.file_uploader("Upload a PDF file to enable RAG", type=["pdf"])
     
     if uploaded_file and st.button("Process Document"):
-        with st.spinner("Processing and indexing document..."):
-            # Save uploaded PDF to a temporary file
+        with st.spinner("Indexing document..."):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 tmp_file.write(uploaded_file.read())
                 tmp_path = tmp_file.name
 
-            # 1. Load document
-            loader = PyPDFLoader(tmp_path)
-            docs = loader.load()
+            try:
+                # 1. Extract text from PDF
+                loader = PyPDFLoader(tmp_path)
+                docs = loader.load()
 
-            # 2. Chunk text
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            splits = text_splitter.split_documents(docs)
+                # 2. Split document into chunks
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                splits = text_splitter.split_documents(docs)
 
-            # 3. Embed & store in ChromaDB vector store
-            embeddings = GoogleGenerativeAIEmbeddings(
-                model="models/text-embedding-004", 
-                google_api_key=api_key
-            )
-            st.session_state.vector_store = Chroma.from_documents(
-                documents=splits, 
-                embedding=embeddings
-            )
-            
-            # Clean up temporary file
-            os.remove(tmp_path)
-            st.success("Document processed successfully!")
+                # 3. Create Vector Store with Google Embeddings
+                embeddings = GoogleGenerativeAIEmbeddings(
+                    model="gemini-embedding-2-preview", 
+                    google_api_key=api_key
+                )
+                st.session_state.vector_store = Chroma.from_documents(
+                    documents=splits, 
+                    embedding=embeddings
+                )
+                st.session_state.document_processed = True
+                st.success("Document loaded successfully! Switching to RAG mode.")
+            except Exception as e:
+                st.error(f"Error processing PDF: {str(e)}")
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
-# --- Main Interface: Chat ---
-# Render past messages
-for message in st.session_state.chat_history:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+    st.markdown("---")
+    
+    # Mode indicator/selector
+    if st.session_state.document_processed:
+        st.info("📌 **Status**: RAG Mode (Document Loaded)")
+        if st.button("Clear Document & Switch to General Chat"):
+            st.session_state.vector_store = None
+            st.session_state.document_processed = False
+            st.rerun()
+    else:
+        st.info("💬 **Status**: General Chat Mode (No Document Uploaded)")
 
-# User prompt input
-user_query = st.chat_input("Ask a question about your document...")
+    if st.button("Clear Chat History"):
+        st.session_state.chat_history = []
+        st.rerun()
+
+# --- Main Interface: Chat Render ---
+for msg in st.session_state.chat_history:
+    role = "user" if isinstance(msg, HumanMessage) else "assistant"
+    with st.chat_message(role):
+        st.markdown(msg.content)
+
+# Input Box
+user_query = st.chat_input("Ask a question or start a conversation...")
 
 if user_query:
-    if not st.session_state.vector_store:
-        st.warning("Please upload and process a PDF document first.")
-    else:
-        # Append and display user prompt
-        st.session_state.chat_history.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
+    # 1. Display user input
+    with st.chat_message("user"):
+        st.markdown(user_query)
 
-        # Generate response using RAG chain
-        with st.chat_message("assistant"):
-            with st.spinner("Searching document & thinking..."):
+    # 2. Build model instance
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.0-flash",
+        google_api_key=api_key,
+        temperature=0.7
+    )
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            if st.session_state.document_processed and st.session_state.vector_store:
+                # --- RAG Mode Execution ---
                 retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 3})
-                
-                llm = ChatGoogleGenerativeAI(
-                    model="gemini-2.5-flash",
-                    google_api_key=api_key,
-                    temperature=0.3
-                )
+                retrieved_docs = retriever.invoke(user_query)
+                context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
-                # Prompt formulation
-                system_prompt = (
-                    "You are an expert assistant for question-answering tasks. "
-                    "Use the following pieces of retrieved context to answer "
-                    "the question. If you don't know the answer, say that you "
-                    "don't know based on the provided document.\n\n"
-                    "{context}"
-                )
-                prompt = ChatPromptTemplate.from_messages(
-                    [
-                        ("system", system_prompt),
-                        ("human", "{input}"),
-                    ]
-                )
+                rag_prompt = ChatPromptTemplate.from_messages([
+                    ("system", 
+                     "You are a helpful assistant. Use the following context from an uploaded document "
+                     "to answer the question. If the user asks something unrelated to the document, "
+                     "you can answer using your general knowledge while mentioning that it isn't in the document.\n\n"
+                     "Document Context:\n{context}"),
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    ("human", "{input}")
+                ])
 
-                question_answer_chain = create_stuff_documents_chain(llm, prompt)
-                rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+                chain = rag_prompt | llm
+                response = chain.invoke({
+                    "context": context_text,
+                    "chat_history": st.session_state.chat_history,
+                    "input": user_query
+                })
+            else:
+                # --- Standard Conversational Mode Execution ---
+                general_prompt = ChatPromptTemplate.from_messages([
+                    ("system", "You are a friendly, intelligent conversational AI chatbot. Help the user with general questions, task planning, or friendly chat."),
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    ("human", "{input}")
+                ])
 
-                # Execute RAG execution loop
-                response = rag_chain.invoke({"input": user_query})
-                answer = response["answer"]
+                chain = general_prompt | llm
+                response = chain.invoke({
+                    "chat_history": st.session_state.chat_history,
+                    "input": user_query
+                })
 
-                st.markdown(answer)
-                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            answer = response.content
+            st.markdown(answer)
+
+    # Update conversation history memory state
+    st.session_state.chat_history.append(HumanMessage(content=user_query))
+    st.session_state.chat_history.append(AIMessage(content=answer))
                 
